@@ -3,12 +3,13 @@ use serde::{Serialize, Deserialize};
 use paho_mqtt as mqtt;
 use std::{env, process, time::Duration};
 use env_logger::Env;
+use std::collections::HashMap;
+use std::error::Error;
+use uuid::Uuid;
+use tuya_actuator_calibrator::RunningConfig;
 #[macro_use]
 extern crate log;
 
-// The topics to which we subscribe.
-const TOPICS: &[&str] = &["zigbee2mqtt/living_room/temp_sensor", "zigbee2mqtt/living_room/thermo_valve"];
-const QOS: &[i32] = &[1, 1];
 
 /////////////////////////////////////////////////////////////////////////////
 
@@ -26,21 +27,35 @@ struct ThermoValveReading{
 fn main() {
     // Initialize the logger from the environment
     let env = Env::default()
-    .filter_or("MY_LOG_LEVEL", "trace")
+    .filter_or("MY_LOG_LEVEL", "info")
     .write_style_or("MY_LOG_STYLE", "always");
 
     env_logger::init_from_env(env);
 
+    let config = RunningConfig::new("config.yaml").unwrap();
+    println!("{:?}", config);
+    // // mqtt part
+    mqtt_part(&config);
+}
 
+// fn read_config() -> Result<(), Box<dyn Error>>{
+//     let f = std::fs::File::open("config.yaml")?;
+//     let d: Config = serde_yaml::from_reader(f)?;
+//     println!("Read YAML string: {:?}", d);
+//     Ok(())
+// }
+
+fn mqtt_part(running_config: &RunningConfig) {
     let host = env::args()
         .nth(1)
-        .unwrap_or_else(|| "tcp://192.168.1.99:1883".to_string());
+        .unwrap_or_else(|| running_config.mqtt.server.clone());
 
     // Create the client. Use an ID for a persistent session.
     // A real system should try harder to use a unique ID.
+    let client_id = Uuid::new_v4();
     let create_opts = mqtt::CreateOptionsBuilder::new()
         .server_uri(host)
-        .client_id("client_8")
+        .client_id(client_id.to_string())
         .finalize();
 
     // Create the client connection
@@ -67,8 +82,8 @@ fn main() {
         info!("Connecting to the MQTT server...");
         cli.connect(conn_opts).await?;
 
-        info!("Subscribing to topics: {:?}", TOPICS);
-        cli.subscribe_many(TOPICS, QOS).await?;
+        info!("Subscribing to topics: {:?}", running_config.topics);
+        cli.subscribe_many(&running_config.topics, &running_config.qos).await?;
 
         // Just loop on incoming messages.
         info!("Waiting for messages...");
@@ -82,39 +97,51 @@ fn main() {
         // Tsm; -> temperature of the sensor
         // Tvm = Tvs - Tvc
         // Tvc_new = Tsm - Tvm = Tsm - (Tvs - Tvc)
-        let mut temp_sensor: f32 = 0.0;
-        let mut temp_calibration_new: f32;
-        let mut temp_calibration_old: f32 = 0.0;
-        let mut temp_show_on_valve_old: f32 = 0.0;
+        let mut temperature_sensors: HashMap<String,f32> = running_config.devices.iter().map(|(_, value)| (value.temperature_sensor.clone(), 0.0)).collect();
+        let mut temperature_calibration_old: HashMap<String,f32> = running_config.devices.iter().map(|(_, value)| (value.valve_actuator.clone(), 0.0)).collect();
+        let mut temperature_show_on_valve_old: HashMap<String,f32> = running_config.devices.iter().map(|(_, value)| (value.valve_actuator.clone(), 0.0)).collect();
         while let Some(msg_opt) = strm.next().await {
             if let Some(msg) = msg_opt {
-                if msg.to_string().contains("temp_sensor"){
-                    let temp_sensor_reading: TemperatureSensorReading = serde_json::from_str(&msg.payload_str().into_owned()).unwrap();
-                    temp_sensor =  temp_sensor_reading.temperature;
-                    info!("Temperature sensor reading: {:?}", temp_sensor_reading);
-                    info!("Temperature {:?}", temp_sensor);
-                    info!("Calibration Old {:?}", temp_calibration_old);
-                    info!("Temperature show on the valve{:?}", temp_show_on_valve_old);
-                }
-                if msg.to_string().contains("thermo_valve"){
-                    let thermo_valve_reading: ThermoValveReading = serde_json::from_str(&msg.payload_str().into_owned()).unwrap();
-                    temp_calibration_old = thermo_valve_reading.local_temperature_calibration;
-                    temp_show_on_valve_old = thermo_valve_reading.local_temperature;
-                    info!("Thermo valve reading {:?}", thermo_valve_reading);
-                    info!("Temperature {:?}", temp_sensor);
-                    info!("Calibration Old {:?}", temp_calibration_old);
-                    info!("Temperature show on the valve {:?}", temp_show_on_valve_old);
-                }
-
-                if temp_sensor> 0.0 && temp_calibration_old > 0.0 {
-                    temp_calibration_new = compute_new_calibration(temp_sensor, temp_calibration_old, temp_show_on_valve_old);
-                    info!("New calibration: {:?}", temp_calibration_new);
-
-                    // Create a message and publish it
-                    if temp_calibration_new != temp_calibration_old {
-                        info!("Send calibration update...");
-                        let msg = mqtt::Message::new("zigbee2mqtt/living_room/thermo_valve/set/local_temperature_calibration", temp_calibration_new.to_string(), mqtt::QOS_1);
-                        cli.publish(msg).await?;
+                for (_, value) in &running_config.devices {
+                    let temp_sensor_name = value.temperature_sensor.clone();
+                    let valve_actuator_name = value.valve_actuator.clone();
+                    if msg.to_string().contains(temp_sensor_name.as_str()) {
+                        let temp_sensor_reading: TemperatureSensorReading = serde_json::from_str(&msg.payload_str().into_owned()).unwrap();
+                        // temp_sensor =  temp_sensor_reading.temperature;
+                        if let Some(value) = temperature_sensors.get_mut(&temp_sensor_name) {
+                            *value = temp_sensor_reading.temperature;
+                        }
+                        info!("Temperature sensor reading: {:?} {:?}", temp_sensor_name, temp_sensor_reading);
+                        // info!("Temperature {:?}", temp_sensor);
+                        // info!("Calibration Old {:?}", temp_calibration_old);
+                        // info!("Temperature show on the valve{:?}", temp_show_on_valve_old);
+                    }
+                    if msg.to_string().contains(valve_actuator_name.as_str()){
+                        let thermo_valve_reading: ThermoValveReading = serde_json::from_str(&msg.payload_str().into_owned()).unwrap();
+                        if let Some(value) = temperature_calibration_old.get_mut(&valve_actuator_name) {
+                            *value = thermo_valve_reading.local_temperature_calibration;
+                        }
+                        if let Some(value) = temperature_show_on_valve_old.get_mut(&valve_actuator_name) {
+                            *value = thermo_valve_reading.local_temperature;
+                        }
+                        info!("Thermo valve reading {:?} {:?}", valve_actuator_name, thermo_valve_reading);
+                        // info!("Temperature {:?}", temp_sensor);
+                        // info!("Calibration Old {:?}", temp_calibration_old);
+                        // info!("Temperature show on the valve {:?}", temp_show_on_valve_old);
+                    }
+                    let temp_sensor = temperature_sensors.get(&temp_sensor_name).unwrap();
+                    let temp_calibration_old = temperature_calibration_old.get(&valve_actuator_name).unwrap();
+                    let temp_show_on_valve_old = temperature_show_on_valve_old.get(&valve_actuator_name).unwrap();
+                    if *temp_sensor> 0.0 && *temp_calibration_old > 0.0 {
+                        let temp_calibration_new = compute_new_calibration(*temp_sensor, *temp_calibration_old, *temp_show_on_valve_old);
+                        // Update calibrator message and publish it
+                        if temp_calibration_new != *temp_calibration_old {
+                            info!("New calibration for actuator {:?} with value {:?}", valve_actuator_name, temp_calibration_new);
+                            let publishing_topic = format!("{}/{}/{}", running_config.mqtt.base_topic, valve_actuator_name,"set/local_temperature_calibration");
+                            info!("Send calibration update to topic {:?} ...", publishing_topic);
+                            let msg = mqtt::Message::new(publishing_topic, temp_calibration_new.to_string(), mqtt::QOS_1);
+                            cli.publish(msg).await?;
+                        }
                     }
                 }
             }
@@ -143,12 +170,13 @@ fn compute_new_calibration(temp_sensor: f32, temp_calibration_old: f32, temp_sho
 }
 
 fn round_to_correct_fraction(fraction: f32) -> f32{
-    if fraction>=0.0 && fraction<=0.25 {
+    let fraction_abs = fraction.abs();
+    if fraction_abs>=0.0 && fraction_abs<=0.25 {
         return 0.0;
-    } else if fraction > 0.25 && fraction <= 0.75{
-        return 0.5;
+    } else if fraction_abs > 0.25 && fraction_abs <= 0.75{
+        return 0.5*fraction.signum();
     } else {
-        return 1.0;
+        return 1.0*fraction.signum();
     }
 }
 
@@ -165,8 +193,8 @@ mod tests {
         // Tvc_new = 20.2 - (20.0 - 1.0) = 1.2 => 1.0
         let result_2 = compute_new_calibration(20.2, 1.0, 20.0);
         assert_eq!(1.0, result_2);
-        // Tvc_new = 20.3 - (19.0 - (-1.0) = 0.3 => 0.5
-        let result_3 = compute_new_calibration(20.3, -1.0, 19.0);
-        assert_eq!(1.0, result_3);
+        // Tvc_new = 20.3 - (22.0 - 0.0) = -1.7 => -1.5
+        let result_3 = compute_new_calibration(20.3, 0.0, 22.0);
+        assert_eq!(-1.5, result_3);
      }
 }
