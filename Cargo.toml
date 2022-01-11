@@ -1,5 +1,5 @@
 [package]
-name = "tuya_actuator_calibrator"
+name = "tuya_ts0601_thermostat_calibrator"
 version = "0.1.0"
 edition = "2021"
 

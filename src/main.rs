@@ -6,7 +6,7 @@ use env_logger::Env;
 use std::collections::HashMap;
 use std::error::Error;
 use uuid::Uuid;
-use tuya_actuator_calibrator::RunningConfig;
+use tuya_ts0601_thermostat_calibrator::RunningConfig;
 #[macro_use]
 extern crate log;
 
@@ -37,13 +37,6 @@ fn main() {
     // // mqtt part
     mqtt_part(&config);
 }
-
-// fn read_config() -> Result<(), Box<dyn Error>>{
-//     let f = std::fs::File::open("config.yaml")?;
-//     let d: Config = serde_yaml::from_reader(f)?;
-//     println!("Read YAML string: {:?}", d);
-//     Ok(())
-// }
 
 fn mqtt_part(running_config: &RunningConfig) {
     let host = env::args()
@@ -79,14 +72,14 @@ fn mqtt_part(running_config: &RunningConfig) {
             .finalize();
 
         // Make the connection to the broker
-        info!("Connecting to the MQTT server...");
+        println!("Connecting to the MQTT server...");
         cli.connect(conn_opts).await?;
 
-        info!("Subscribing to topics: {:?}", running_config.topics);
+        println!("Subscribing to topics: {:?}", running_config.topics);
         cli.subscribe_many(&running_config.topics, &running_config.qos).await?;
 
         // Just loop on incoming messages.
-        info!("Waiting for messages...");
+        println!("Waiting for messages...");
 
         // Note that we're not providing a way to cleanly shut down and
         // disconnect. Therefore, when you kill this app (with a ^C or
@@ -111,7 +104,7 @@ fn mqtt_part(running_config: &RunningConfig) {
                         if let Some(value) = temperature_sensors.get_mut(&temp_sensor_name) {
                             *value = temp_sensor_reading.temperature;
                         }
-                        info!("Temperature sensor reading: {:?} {:?}", temp_sensor_name, temp_sensor_reading);
+                        println!("Temperature sensor reading: {:?} {:?}", temp_sensor_name, temp_sensor_reading);
                         // info!("Temperature {:?}", temp_sensor);
                         // info!("Calibration Old {:?}", temp_calibration_old);
                         // info!("Temperature show on the valve{:?}", temp_show_on_valve_old);
@@ -124,7 +117,7 @@ fn mqtt_part(running_config: &RunningConfig) {
                         if let Some(value) = temperature_show_on_valve_old.get_mut(&valve_actuator_name) {
                             *value = thermo_valve_reading.local_temperature;
                         }
-                        info!("Thermo valve reading {:?} {:?}", valve_actuator_name, thermo_valve_reading);
+                        println!("Thermo valve reading {:?} {:?}", valve_actuator_name, thermo_valve_reading);
                         // info!("Temperature {:?}", temp_sensor);
                         // info!("Calibration Old {:?}", temp_calibration_old);
                         // info!("Temperature show on the valve {:?}", temp_show_on_valve_old);
@@ -132,13 +125,13 @@ fn mqtt_part(running_config: &RunningConfig) {
                     let temp_sensor = temperature_sensors.get(&temp_sensor_name).unwrap();
                     let temp_calibration_old = temperature_calibration_old.get(&valve_actuator_name).unwrap();
                     let temp_show_on_valve_old = temperature_show_on_valve_old.get(&valve_actuator_name).unwrap();
-                    if *temp_sensor> 0.0 && *temp_calibration_old > 0.0 {
+                    if *temp_sensor> 0.0 && *temp_show_on_valve_old > 0.0 {
                         let temp_calibration_new = compute_new_calibration(*temp_sensor, *temp_calibration_old, *temp_show_on_valve_old);
                         // Update calibrator message and publish it
-                        if temp_calibration_new != *temp_calibration_old {
-                            info!("New calibration for actuator {:?} with value {:?}", valve_actuator_name, temp_calibration_new);
+                        if (temp_calibration_new - *temp_calibration_old).abs() > 0.49 {
+                            println!("New calibration for actuator {:?} with value {:?}", valve_actuator_name, temp_calibration_new);
                             let publishing_topic = format!("{}/{}/{}", running_config.mqtt.base_topic, valve_actuator_name,"set/local_temperature_calibration");
-                            info!("Send calibration update to topic {:?} ...", publishing_topic);
+                            println!("Send calibration update to topic {:?} ...", publishing_topic);
                             let msg = mqtt::Message::new(publishing_topic, temp_calibration_new.to_string(), mqtt::QOS_1);
                             cli.publish(msg).await?;
                         }
@@ -166,14 +159,20 @@ fn mqtt_part(running_config: &RunningConfig) {
 fn compute_new_calibration(temp_sensor: f32, temp_calibration_old: f32, temp_show_on_valve_old: f32) -> f32{
     let temp_calibration_new =  temp_sensor - (temp_show_on_valve_old - temp_calibration_old );
     let fraction_correction = round_to_correct_fraction(temp_calibration_new.fract());
-    temp_calibration_new.trunc() + fraction_correction
+    let new_calibration = temp_calibration_new.trunc() + fraction_correction;
+    if new_calibration.abs() <= 5.0 {
+        return new_calibration
+    } else {
+        return 5.0*new_calibration.signum();
+    }
+
 }
 
 fn round_to_correct_fraction(fraction: f32) -> f32{
     let fraction_abs = fraction.abs();
-    if fraction_abs>=0.0 && fraction_abs<=0.25 {
+    if fraction_abs>=0.0 && fraction_abs<=0.33 {
         return 0.0;
-    } else if fraction_abs > 0.25 && fraction_abs <= 0.75{
+    } else if fraction_abs > 0.33 && fraction_abs <= 0.66{
         return 0.5*fraction.signum();
     } else {
         return 1.0*fraction.signum();
@@ -193,8 +192,14 @@ mod tests {
         // Tvc_new = 20.2 - (20.0 - 1.0) = 1.2 => 1.0
         let result_2 = compute_new_calibration(20.2, 1.0, 20.0);
         assert_eq!(1.0, result_2);
-        // Tvc_new = 20.3 - (22.0 - 0.0) = -1.7 => -1.5
+        // Tvc_new = 20.3 - (22.0 - 0.0) = -1.7 => -2.0
         let result_3 = compute_new_calibration(20.3, 0.0, 22.0);
-        assert_eq!(-1.5, result_3);
+        assert_eq!(-2.0, result_3);
+        // Tvc_new = 20.3 - (27.0 - 0.0) = -6.7 => -5.0
+        let result_4 = compute_new_calibration(20.3, 0.0, 27.0);
+        assert_eq!(-5.0, result_4);
+        // Tvc_new = 24.0 - (13.2 - 0.0) = 10.8 => +5.0
+        let result_5 = compute_new_calibration(24.0, 0.0, 13.2);
+        assert_eq!(5.0, result_5);
      }
 }
