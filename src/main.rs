@@ -11,6 +11,7 @@ mod mqtt_client;
 mod calibrator;
 mod message_handler;
 mod state;
+mod server;
 
 
 /////////////////////////////////////////////////////////////////////////////
@@ -36,7 +37,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     log::debug!("{:?}", mqttoptions);
 
     // Specify message handlers
-    let calibrator = Arc::new(calibrator::Calibrator {});
+    let _calibrator = Arc::new(calibrator::Calibrator {});
     let handler = Arc::new(message_handler::MessageHandler::new(config.devices.clone()));
 
     // create initial state
@@ -50,6 +51,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mqtt_client.run(running_state).await;
     });
 
+    // setup web server
+    server::set_up_web_server(state.clone());
+
+    // register signal handler
     match signal::ctrl_c().await {
         Ok(()) => {
             log::debug!("Shutting Down");
@@ -62,3 +67,5 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     Ok(())
 }
+
+

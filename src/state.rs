@@ -40,4 +40,8 @@ impl State {
       }
     }
   }
+
+  pub fn get_devices_state(&self) -> &HashMap<String, CoupledThermoValveAndSensorReadings> {
+    &self.devices_state
+  }
 }

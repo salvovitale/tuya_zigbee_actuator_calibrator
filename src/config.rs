@@ -19,10 +19,9 @@ pub struct RunningConfig{
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct MqttConfig{
-    pub server: String,
     pub host: String,
-    pub base_topic: String,
     pub port: u16,
+    pub base_topic: String,
     pub username: Option<String>,
     pub password: Option<String>,
     qos_value: i32,
