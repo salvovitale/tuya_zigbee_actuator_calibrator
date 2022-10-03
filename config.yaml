@@ -1,22 +1,24 @@
 mqtt:
-  server: tcp://192.168.1.99:1883
+  host: 192.168.1.99
+  port: 1883
   base_topic: zigbee2mqtt
   qos_value: 1
 
+
 devices:
-  '0':
+  'living_room':
     temperature_sensor: living_room/temp_sensor
     valve_actuator: living_room/thermo_valve
-  '1':
+  'kids_bedroom':
     temperature_sensor: kids_bedroom/temp_sensor
     valve_actuator: kids_bedroom/thermo_valve
-  '2':
+  'office':
     temperature_sensor: office/temp_sensor
     valve_actuator: office/thermo_valve
-  '3':
+  'bathroom':
     temperature_sensor: bathroom/temp_sensor
     valve_actuator: bathroom/thermo_valve
-  '4':
+  'master_bedroom':
     temperature_sensor: master_bedroom/temp_sensor
     valve_actuator: master_bedroom/thermo_valve
 
